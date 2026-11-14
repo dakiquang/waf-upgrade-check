@@ -36,6 +36,29 @@ def list_versions(
         params["NextMarker"] = marker
 
 
+def list_version_timestamps(
+    client: Any, name: str, scope: str, vendor: str = "AWS"
+) -> tuple[str | None, list[tuple[str, Any]]]:
+    """Return ``(current default version, (name, LastUpdateTimestamp) pairs in API order)``.
+
+    Timestamps are returned as the client gives them; a missing timestamp is ``None``.
+    """
+    params: dict[str, Any] = {"VendorName": vendor, "Name": name, "Scope": scope}
+    default: str | None = None
+    versions: list[tuple[str, Any]] = []
+    while True:
+        resp = client.list_available_managed_rule_group_versions(**params)
+        default = resp.get("CurrentDefaultVersion") or default
+        versions.extend(
+            (version["Name"], version.get("LastUpdateTimestamp"))
+            for version in resp.get("Versions", [])
+        )
+        marker = resp.get("NextMarker")
+        if not marker:
+            return default, versions
+        params["NextMarker"] = marker
+
+
 def describe(
     client: Any, name: str, scope: str, version: str, vendor: str = "AWS"
 ) -> RuleGroupVersion:
@@ -43,3 +66,8 @@ def describe(
         VendorName=vendor, Name=name, Scope=scope, VersionName=version
     )
     return RuleGroupVersion.from_response(resp)
+
+
+def get_web_acl(client: Any, name: str, acl_id: str, scope: str) -> dict[str, Any]:
+    """Return the ``GetWebACL`` response (``WebACL`` and ``LockToken``)."""
+    return client.get_web_acl(Name=name, Scope=scope, Id=acl_id)

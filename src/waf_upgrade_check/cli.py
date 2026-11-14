@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 from collections.abc import Iterable
-from typing import TextIO
+from typing import Any, TextIO
 
 from botocore.exceptions import BotoCoreError, ClientError
 
 from . import __version__, aws
+from .check import (
+    LEVELS,
+    Finding,
+    RuleGroupCatalog,
+    TargetError,
+    check_web_acl,
+    managed_references,
+    resolve_versions,
+)
 from .diff import VersionDiff, diff_versions
+from .model import RuleGroupVersion
 
 PROG = "waf-upgrade-check"
 
@@ -64,6 +75,32 @@ def build_parser() -> argparse.ArgumentParser:
     diff.add_argument("from_version", metavar="from", help="current version")
     diff.add_argument("to_version", metavar="to", help="target version")
     diff.set_defaults(handler=_cmd_diff)
+
+    check_cmd = subparsers.add_parser(
+        "check",
+        parents=[common],
+        help="check a web ACL's AWS managed rule groups against a target version",
+        description=(
+            "Check every AWS managed rule group in a web ACL against a target version. "
+            "Exit code 1 when at least one finding is an error."
+        ),
+    )
+    source = check_cmd.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--web-acl-file", metavar="PATH", help="web ACL JSON as returned by get-web-acl"
+    )
+    source.add_argument("--web-acl", metavar="NAME", help="name of the web ACL to fetch")
+    check_cmd.add_argument("--id", metavar="ID", help="web ACL ID (required with --web-acl)")
+    check_cmd.add_argument(
+        "--target",
+        default="default",
+        metavar="default|latest|VERSION",
+        help=(
+            "version to check against: the current default, the newest by "
+            "LastUpdateTimestamp, or a version name (default: default)"
+        ),
+    )
+    check_cmd.set_defaults(handler=_cmd_check)
     return parser
 
 
@@ -101,9 +138,77 @@ def _cmd_diff(args: argparse.Namespace, out: TextIO) -> None:
         out.write(_format_diff_text(args, result))
 
 
+def _read_web_acl(path: str) -> dict[str, Any]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise UsageError(f"cannot read web ACL file {path}: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("WebACL"), dict):
+        raise UsageError(f"web ACL file {path} has no WebACL object")
+    return data
+
+
+def _cmd_check(args: argparse.Namespace, out: TextIO) -> int:
+    if args.web_acl is not None and args.id is None:
+        raise UsageError("--web-acl requires --id")
+    if args.web_acl_file is not None and args.id is not None:
+        raise UsageError("--id cannot be used with --web-acl-file")
+    web_acl = _read_web_acl(args.web_acl_file) if args.web_acl_file is not None else None
+    client = _client(args)
+    if web_acl is None:
+        web_acl = aws.get_web_acl(client, args.web_acl, args.id, args.scope)
+
+    refs = managed_references(web_acl)
+    listed: dict[str, tuple[str | None, list[tuple[str, Any]]]] = {}
+    for ref in refs:
+        if ref.group not in listed:
+            listed[ref.group] = aws.list_version_timestamps(client, ref.group, args.scope)
+
+    needed: dict[tuple[str, str], None] = {}
+    for ref in refs:
+        default, available = listed[ref.group]
+        try:
+            versions = resolve_versions(ref.group, ref.pinned, default, available, args.target)
+        except TargetError as exc:
+            raise UsageError(str(exc)) from exc
+        for version in versions:
+            if version is not None:
+                needed[(ref.group, version)] = None
+
+    described: dict[str, dict[str, RuleGroupVersion]] = {group: {} for group in listed}
+    for group, version in needed:
+        described[group][version] = aws.describe(client, group, args.scope, version)
+
+    catalogs = {
+        group: RuleGroupCatalog(default, tuple(available), described[group])
+        for group, (default, available) in listed.items()
+    }
+    findings = check_web_acl(web_acl, catalogs, args.target)
+    if args.format == "json":
+        payload = [dataclasses.asdict(finding) for finding in findings]
+        out.write(json.dumps(payload, indent=2) + "\n")
+    else:
+        out.write(_format_check_text(findings))
+    return 1 if any(finding.level == "error" for finding in findings) else 0
+
+
 def _format_versions_text(default: str | None, names: list[str]) -> str:
     lines = [f"{name} (default)" if name == default else name for name in names]
     lines.append(f"Default version: {default or 'none'}")
+    return "\n".join(lines) + "\n"
+
+
+def _format_check_text(findings: list[Finding]) -> str:
+    lines = [
+        f"{finding.level.upper()}  {finding.rule_group}  {finding.code}  {finding.message}"
+        for finding in findings
+    ]
+    counts = {level: sum(finding.level == level for finding in findings) for level in LEVELS}
+    lines.append(
+        f"Summary: {counts['error']} error(s), {counts['warning']} warning(s), "
+        f"{counts['info']} info"
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -167,11 +272,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help()
         return 0
     try:
-        args.handler(args, sys.stdout)
+        status = args.handler(args, sys.stdout)
     except (UsageError, BotoCoreError, ClientError) as exc:
         print(f"{PROG}: error: {exc}", file=sys.stderr)
         return 2
-    return 0
+    return status or 0
 
 
 if __name__ == "__main__":

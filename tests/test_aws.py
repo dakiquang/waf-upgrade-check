@@ -27,6 +27,44 @@ def test_list_versions_follows_pagination(wafv2_client, load_fixture):
     assert result == ("Version_1.1", ["Version_1.10", "Version_1.1", "Version_1.0"])
 
 
+def test_list_version_timestamps_follows_pagination(wafv2_client, load_fixture):
+    base = {"VendorName": "AWS", "Name": GROUP, "Scope": "REGIONAL"}
+    with Stubber(wafv2_client) as stub:
+        stub.add_response(
+            "list_available_managed_rule_group_versions",
+            load_fixture("list_versions_page1.json"),
+            base,
+        )
+        stub.add_response(
+            "list_available_managed_rule_group_versions",
+            load_fixture("list_versions_page2.json"),
+            {**base, "NextMarker": "page-2-marker"},
+        )
+
+        result = aws.list_version_timestamps(wafv2_client, GROUP, "REGIONAL")
+
+        stub.assert_no_pending_responses()
+    assert result == (
+        "Version_1.1",
+        [("Version_1.10", 1767225600), ("Version_1.1", 1759276800), ("Version_1.0", 1751328000)],
+    )
+
+
+def test_get_web_acl_requests_name_scope_and_id(wafv2_client, load_fixture):
+    response = load_fixture("web_acl_upgrade.json")
+    with Stubber(wafv2_client) as stub:
+        stub.add_response(
+            "get_web_acl",
+            response,
+            {"Name": "example-web-acl", "Scope": "REGIONAL", "Id": "acl-id"},
+        )
+
+        result = aws.get_web_acl(wafv2_client, "example-web-acl", "acl-id", "REGIONAL")
+
+        stub.assert_no_pending_responses()
+    assert result["WebACL"] == response["WebACL"]
+
+
 def test_describe_requests_the_given_version(wafv2_client, load_fixture):
     with Stubber(wafv2_client) as stub:
         stub.add_response(
