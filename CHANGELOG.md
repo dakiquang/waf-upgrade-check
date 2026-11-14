@@ -5,3 +5,9 @@ All notable changes to this project are documented here. The format follows
 [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+
+### Added
+
+- `versions <rule-group>` command: lists the available versions of an AWS managed rule group and marks the current default.
+- `diff <rule-group> <from> <to>` command: compares two versions (rules added and removed, rule action changes, capacity, available and consumed labels).
+- `--scope`, `--region`, `--profile` and `--format` options for both commands.
