@@ -23,3 +23,16 @@ jobs:
       - run: uv run --frozen ruff check .
       - run: uv run --frozen ruff format --check .
       - run: uv run --frozen pytest
+
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.10"
+      - run: uv build --wheel
+      - run: uv venv "$RUNNER_TEMP/wheel-venv"
+      - run: uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" dist/*.whl
+      - run: $RUNNER_TEMP/wheel-venv/bin/waf-upgrade-check --version
+      - run: $RUNNER_TEMP/wheel-venv/bin/waf-upgrade-check check --help

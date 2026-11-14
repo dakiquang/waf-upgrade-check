@@ -6,6 +6,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from botocore.utils import parse_to_aware_datetime
+
 from .diff import diff_versions
 from .model import RuleGroupVersion
 
@@ -29,6 +31,7 @@ class ManagedRef:
     group: str
     pinned: str | None
     overrides: tuple[tuple[str, str], ...]  # (source, rule name)
+    priority: int | None
 
 
 @dataclass(frozen=True)
@@ -36,7 +39,8 @@ class RuleGroupCatalog:
     """What is known about one managed rule group.
 
     ``available`` holds ``(version name, LastUpdateTimestamp)`` in API order; ``versions``
-    holds every described version (in use and target).
+    holds every described version (in use and target). A ``default`` that is missing from
+    ``versions`` could not be described.
     """
 
     default: str | None
@@ -62,7 +66,13 @@ def managed_references(web_acl: Mapping[str, Any]) -> list[ManagedRef]:
             ("ExcludedRules", excluded["Name"]) for excluded in statement.get("ExcludedRules", [])
         )
         refs.append(
-            ManagedRef(rule["Name"], statement["Name"], statement.get("Version"), overrides)
+            ManagedRef(
+                rule["Name"],
+                statement["Name"],
+                statement.get("Version"),
+                overrides,
+                rule.get("Priority"),
+            )
         )
     return refs
 
@@ -96,7 +106,11 @@ def resolve_versions(
             raise TargetError(
                 f"cannot resolve latest version for {group}: no version has a LastUpdateTimestamp"
             )
-        return in_use, max(stamped, key=lambda pair: pair[1])[0]
+        try:
+            latest = max(stamped, key=lambda pair: parse_to_aware_datetime(pair[1]))
+        except ValueError as exc:
+            raise TargetError(f"cannot resolve latest version for {group}: {exc}") from exc
+        return in_use, latest[0]
     if target not in names:
         raise TargetError(
             f"target version {target} is not available for {group}; "
@@ -156,6 +170,9 @@ def _label_no_longer_emitted(
     findings = []
     for rule in rules:
         if rule["Name"] == ref.rule_name:
+            continue
+        priority = rule.get("Priority")
+        if priority is not None and ref.priority is not None and priority <= ref.priority:
             continue
         seen = set()
         for scope, key in _label_matches(rule.get("Statement", {})):
@@ -234,6 +251,24 @@ def _behind_default(ref: ManagedRef, default: str | None) -> list[Finding]:
     ]
 
 
+def _default_not_describable(ref: ManagedRef, default: str) -> list[Finding]:
+    return [
+        Finding(
+            "default-not-describable",
+            "warning",
+            ref.group,
+            f"default version {default} cannot be described; comparisons that need it are skipped",
+            {"rule": ref.rule_name, "default_version": default},
+        )
+    ]
+
+
+def _described(catalog: RuleGroupCatalog, name: str | None) -> RuleGroupVersion | None:
+    if name is None or (name == catalog.default and name not in catalog.versions):
+        return None
+    return catalog.versions[name]
+
+
 def _rules_changed(
     ref: ManagedRef, in_use: RuleGroupVersion, target: RuleGroupVersion
 ) -> list[Finding]:
@@ -267,7 +302,8 @@ def check_web_acl(
 ) -> list[Finding]:
     """Return the findings for every AWS managed rule group in ``web_acl``, most severe first.
 
-    ``catalogs`` must hold every referenced group with its in-use and target versions described.
+    ``catalogs`` must hold every referenced group with its in-use and target versions described,
+    except a default that cannot be described.
     """
     acl = web_acl["WebACL"]
     rules = acl.get("Rules", [])
@@ -277,11 +313,16 @@ def check_web_acl(
         in_use_name, target_name = resolve_versions(
             ref.group, ref.pinned, catalog.default, catalog.available, target
         )
-        in_use = catalog.versions[in_use_name] if in_use_name else None
-        wanted = catalog.versions[target_name] if target_name else None
+        in_use = _described(catalog, in_use_name)
+        wanted = _described(catalog, target_name)
 
+        default = catalog.default
+        undescribable = default is not None and default not in catalog.versions
+        if undescribable and default in (in_use_name, target_name):
+            findings += _default_not_describable(ref, default)
         findings += _version_unavailable(ref, catalog)
-        findings += _behind_default(ref, catalog.default)
+        if not undescribable:  # default-not-describable already covers an unusable default
+            findings += _behind_default(ref, catalog.default)
         if wanted is not None:
             findings += _override_missing_rule(ref, wanted)
         if in_use is not None and wanted is not None:

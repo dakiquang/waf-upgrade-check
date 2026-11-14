@@ -178,7 +178,15 @@ def _cmd_check(args: argparse.Namespace, out: TextIO) -> int:
 
     described: dict[str, dict[str, RuleGroupVersion]] = {group: {} for group in listed}
     for group, version in needed:
-        described[group][version] = aws.describe(client, group, args.scope, version)
+        default, available = listed[group]
+        if version == default and all(name != default for name, _ in available):
+            continue
+        try:
+            described[group][version] = aws.describe(client, group, args.scope, version)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code")
+            if version != default or code != "WAFNonexistentItemException":
+                raise
 
     catalogs = {
         group: RuleGroupCatalog(default, tuple(available), described[group])
