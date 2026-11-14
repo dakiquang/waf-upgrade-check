@@ -155,6 +155,8 @@ def test_cloudfront_with_other_region_exits_2(monkeypatch, capsys):
         ["versions", GROUP, "--scope", "GLOBAL"],
         ["check"],
         ["check", "--web-acl-file", "acl.json", "--web-acl", "example-web-acl"],
+        ["check", "--bundle", "bundle.json", "--web-acl-file", "acl.json"],
+        ["check", "--bundle", "bundle.json", "--web-acl", "example-web-acl"],
     ],
 )
 def test_usage_errors_exit_2(argv):
@@ -242,40 +244,7 @@ def _add_real_list(stub, load_fixture, group, fixture):
     )
 
 
-def _managed_rule(name, priority, group, version=None, overrides=()):
-    statement = {"VendorName": "AWS", "Name": group}
-    if version is not None:
-        statement["Version"] = version
-    if overrides:
-        statement["RuleActionOverrides"] = [
-            {"Name": override, "ActionToUse": {"Count": {}}} for override in overrides
-        ]
-    return {
-        "Name": name,
-        "Priority": priority,
-        "Statement": {"ManagedRuleGroupStatement": statement},
-    }
-
-
-def test_check_undescribable_default_warns_and_checks_other_groups(
-    stub, load_fixture, tmp_path, capsys
-):
-    web_acl = {
-        "WebACL": {
-            "Rules": [
-                _managed_rule("AWS-Windows", 0, WINDOWS),
-                _managed_rule(
-                    "AWS-KBI",
-                    1,
-                    KBI,
-                    version="Version_1.0",
-                    overrides=["BadAuthToken_COOKIE_AUTHORIZATION"],
-                ),
-            ]
-        }
-    }
-    path = tmp_path / "web-acl.json"
-    path.write_text(json.dumps(web_acl))
+def _add_windows_kbi_responses(stub, load_fixture):
     _add_real_list(stub, load_fixture, WINDOWS, "windows_list_rc_default.json")
     _add_real_list(stub, load_fixture, KBI, "known_bad_inputs_list.json")
     for version, fixture in (
@@ -287,6 +256,14 @@ def test_check_undescribable_default_warns_and_checks_other_groups(
             load_fixture(f"aws/{fixture}"),
             {"VendorName": "AWS", "Name": KBI, "Scope": "REGIONAL", "VersionName": version},
         )
+
+
+def test_check_undescribable_default_warns_and_checks_other_groups(
+    stub, load_fixture, windows_kbi_web_acl, tmp_path, capsys
+):
+    path = tmp_path / "web-acl.json"
+    path.write_text(json.dumps(windows_kbi_web_acl))
+    _add_windows_kbi_responses(stub, load_fixture)
 
     assert main(["check", "--web-acl-file", str(path)]) == 1
 
@@ -325,7 +302,7 @@ def test_check_default_describe_other_error_exits_2(stub, load_fixture, capsys):
     assert "WAFAccessDeniedException" in capsys.readouterr().err
 
 
-def test_check_api_json(stub, load_fixture, capsys):
+def _add_api_responses(stub, load_fixture):
     stub.add_response(
         "get_web_acl",
         load_fixture("web_acl_upgrade.json"),
@@ -335,8 +312,14 @@ def test_check_api_json(stub, load_fixture, capsys):
     _add_describe(stub, load_fixture, "describe_v1_0.json", "Version_1.0")
     _add_describe(stub, load_fixture, "describe_v1_1.json", "Version_1.1")
 
-    argv = ["check", "--web-acl", "example-web-acl", "--id", WEB_ACL_ID, "--format", "json"]
-    assert main(argv) == 1
+
+API_ARGV = ["check", "--web-acl", "example-web-acl", "--id", WEB_ACL_ID, "--format", "json"]
+
+
+def test_check_api_json(stub, load_fixture, capsys):
+    _add_api_responses(stub, load_fixture)
+
+    assert main(API_ARGV) == 1
 
     findings = json.loads(capsys.readouterr().out)
     assert [finding["code"] for finding in findings] == [
@@ -374,14 +357,6 @@ def test_check_get_web_acl_error_exits_2(stub, capsys):
     assert "Traceback" not in err
 
 
-@pytest.fixture
-def no_client(monkeypatch):
-    def unexpected(scope, region, profile):
-        raise AssertionError("client must not be created")
-
-    monkeypatch.setattr(aws, "make_client", unexpected)
-
-
 @pytest.mark.parametrize("content", [None, "not json", '{"Rules": []}'])
 def test_check_unreadable_file_exits_2(no_client, tmp_path, capsys, content):
     path = tmp_path / "web-acl.json"
@@ -416,9 +391,58 @@ def test_check_unavailable_explicit_target_exits_2(stub, load_fixture, capsys):
             ["check", "--web-acl-file", "acl.json", "--id", WEB_ACL_ID],
             "--id cannot be used with --web-acl-file",
         ),
+        (
+            ["check", "--bundle", "bundle.json", "--id", WEB_ACL_ID],
+            "--id cannot be used with --bundle",
+        ),
     ],
 )
 def test_check_option_errors_exit_2(no_client, capsys, argv, message):
     assert main(argv) == 2
 
     assert capsys.readouterr().err == f"waf-upgrade-check: error: {message}\n"
+
+
+def _check_bundle_from_snippet(argv, fake_aws, run_snippet, tmp_path, capsys):
+    """Print the snippet for ``argv``, run it on ``fake_aws`` and check the bundle offline."""
+    assert main(["collect-script", *argv]) == 0
+    bundle = run_snippet(capsys.readouterr().out, fake_aws.call_boto3)
+    path = tmp_path / "bundle.json"
+    path.write_text(json.dumps(bundle))
+    return path
+
+
+def test_check_bundle_matches_api_mode(
+    stub, load_fixture, fake_aws, run_snippet, monkeypatch, tmp_path, capsys
+):
+    _add_api_responses(stub, load_fixture)
+    assert main(API_ARGV) == 1
+    api_output = capsys.readouterr().out
+    monkeypatch.setattr(aws, "make_client", _no_client)
+
+    argv = ["--web-acl", "example-web-acl", "--id", WEB_ACL_ID, "--region", "us-east-1"]
+    path = _check_bundle_from_snippet(argv, fake_aws, run_snippet, tmp_path, capsys)
+
+    assert main(["check", "--bundle", str(path), "--format", "json"]) == 1
+    assert capsys.readouterr().out == api_output
+
+
+def test_check_bundle_matches_api_mode_with_undescribable_default(
+    stub, load_fixture, windows_kbi_web_acl, fake_aws, run_snippet, monkeypatch, tmp_path, capsys
+):
+    web_acl_path = tmp_path / "web-acl.json"
+    web_acl_path.write_text(json.dumps(windows_kbi_web_acl))
+    _add_windows_kbi_responses(stub, load_fixture)
+    assert main(["check", "--web-acl-file", str(web_acl_path)]) == 1
+    api_output = capsys.readouterr().out
+    monkeypatch.setattr(aws, "make_client", _no_client)
+
+    argv = ["--web-acl-file", str(web_acl_path), "--region", "us-east-1"]
+    path = _check_bundle_from_snippet(argv, fake_aws, run_snippet, tmp_path, capsys)
+
+    assert main(["check", "--bundle", str(path)]) == 1
+    assert capsys.readouterr().out == api_output
+
+
+def _no_client(scope, region, profile):
+    raise AssertionError("client must not be created")
