@@ -444,6 +444,15 @@ def test_undescribable_in_use_default_still_checks_target(load_fixture):
     ]
 
 
+def test_pinned_version_with_undescribable_default_is_not_also_behind_default(load_fixture):
+    catalog = listed_catalog(load_fixture, "windows_list_rc_default.json", version("Version_2.4"))
+    acl = web_acl(managed_rule(group=WINDOWS, version="Version_2.4"))
+
+    codes = [f.code for f in check_web_acl(acl, {WINDOWS: catalog}, "default")]
+
+    assert codes == ["default-not-describable"]
+
+
 # resolve_versions
 
 
@@ -513,6 +522,11 @@ def test_resolve_latest_known_bad_inputs_by_timestamp(load_fixture, order):
 def test_resolve_latest_without_any_timestamp_raises():
     with pytest.raises(TargetError, match=GROUP):
         resolve_versions(GROUP, None, "Version_1.1", (("Version_1.1", None),), "latest")
+
+
+def test_resolve_latest_with_unparsable_timestamp_raises_target_error():
+    with pytest.raises(TargetError, match=GROUP):
+        resolve_versions(GROUP, None, "Version_1.1", (("Version_1.1", "not a date"),), "latest")
 
 
 def test_resolve_explicit_missing_target_names_group_and_versions():

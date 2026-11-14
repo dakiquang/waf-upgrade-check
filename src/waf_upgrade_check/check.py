@@ -106,7 +106,10 @@ def resolve_versions(
             raise TargetError(
                 f"cannot resolve latest version for {group}: no version has a LastUpdateTimestamp"
             )
-        latest = max(stamped, key=lambda pair: parse_to_aware_datetime(pair[1]))
+        try:
+            latest = max(stamped, key=lambda pair: parse_to_aware_datetime(pair[1]))
+        except ValueError as exc:
+            raise TargetError(f"cannot resolve latest version for {group}: {exc}") from exc
         return in_use, latest[0]
     if target not in names:
         raise TargetError(
@@ -318,7 +321,8 @@ def check_web_acl(
         if undescribable and default in (in_use_name, target_name):
             findings += _default_not_describable(ref, default)
         findings += _version_unavailable(ref, catalog)
-        findings += _behind_default(ref, catalog.default)
+        if not undescribable:  # default-not-describable already covers an unusable default
+            findings += _behind_default(ref, catalog.default)
         if wanted is not None:
             findings += _override_missing_rule(ref, wanted)
         if in_use is not None and wanted is not None:
