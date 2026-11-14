@@ -1,0 +1,26 @@
+name: gitleaks
+
+# push and pull_request scan only the new commits; a manual or scheduled run scans the whole history.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1'  # weekly
+
+permissions:
+  contents: read
+  pull-requests: read  # the action lists PR commits
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # scan the whole history, not only the last commit
+
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
