@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-14
+
 ### Added
 
 - `versions <rule-group>` command: lists the available versions of an AWS managed rule group and marks the current default.
@@ -20,3 +22,7 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - The README is organized around use with the AWS MCP Server, and adds a GitHub Actions example, a read-only IAM policy and the known limits.
+- Known limits in the README include versions such as `AWSManagedRulesCommonRuleSet` `Version_1.0` that return no `AvailableLabels`.
+
+[Unreleased]: https://github.com/dakiquang/waf-upgrade-check/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/dakiquang/waf-upgrade-check/releases/tag/v0.1.0

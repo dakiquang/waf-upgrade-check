@@ -1,6 +1,6 @@
 [project]
 name = "waf-upgrade-check"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Check what breaks before you upgrade an AWS WAF managed rule group version."
 readme = "README.md"
 license = "MIT"
