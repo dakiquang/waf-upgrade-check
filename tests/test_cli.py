@@ -228,6 +228,103 @@ def test_check_clean_file_describes_once_and_exits_0(stub, load_fixture, capsys)
     assert capsys.readouterr().out == "Summary: 0 error(s), 0 warning(s), 0 info\n"
 
 
+KBI = "AWSManagedRulesKnownBadInputsRuleSet"
+WINDOWS = "AWSManagedRulesWindowsRuleSet"
+
+
+def _add_real_list(stub, load_fixture, group, fixture):
+    listing = load_fixture(f"aws/{fixture}")
+    del listing["NextMarker"]
+    stub.add_response(
+        "list_available_managed_rule_group_versions",
+        listing,
+        {"VendorName": "AWS", "Name": group, "Scope": "REGIONAL"},
+    )
+
+
+def _managed_rule(name, priority, group, version=None, overrides=()):
+    statement = {"VendorName": "AWS", "Name": group}
+    if version is not None:
+        statement["Version"] = version
+    if overrides:
+        statement["RuleActionOverrides"] = [
+            {"Name": override, "ActionToUse": {"Count": {}}} for override in overrides
+        ]
+    return {
+        "Name": name,
+        "Priority": priority,
+        "Statement": {"ManagedRuleGroupStatement": statement},
+    }
+
+
+def test_check_undescribable_default_warns_and_checks_other_groups(
+    stub, load_fixture, tmp_path, capsys
+):
+    web_acl = {
+        "WebACL": {
+            "Rules": [
+                _managed_rule("AWS-Windows", 0, WINDOWS),
+                _managed_rule(
+                    "AWS-KBI",
+                    1,
+                    KBI,
+                    version="Version_1.0",
+                    overrides=["BadAuthToken_COOKIE_AUTHORIZATION"],
+                ),
+            ]
+        }
+    }
+    path = tmp_path / "web-acl.json"
+    path.write_text(json.dumps(web_acl))
+    _add_real_list(stub, load_fixture, WINDOWS, "windows_list_rc_default.json")
+    _add_real_list(stub, load_fixture, KBI, "known_bad_inputs_list.json")
+    for version, fixture in (
+        ("Version_1.0", "known_bad_inputs_v1_0.json"),
+        ("Version_1.26", "known_bad_inputs_v1_26.json"),
+    ):
+        stub.add_response(
+            "describe_managed_rule_group",
+            load_fixture(f"aws/{fixture}"),
+            {"VendorName": "AWS", "Name": KBI, "Scope": "REGIONAL", "VersionName": version},
+        )
+
+    assert main(["check", "--web-acl-file", str(path)]) == 1
+
+    assert capsys.readouterr().out.splitlines() == [
+        f"ERROR  {KBI}  override-missing-rule  RuleActionOverrides entry "
+        "BadAuthToken_COOKIE_AUTHORIZATION in rule AWS-KBI is not a rule in Version_1.26",
+        f"WARNING  {WINDOWS}  default-not-describable  default version Version_2.4_PLUS_RC_COUNT "
+        "cannot be described; comparisons that need it are skipped",
+        f"INFO  {KBI}  behind-default  pinned version Version_1.0 differs from default "
+        "Version_1.26",
+        f"INFO  {KBI}  rules-changed  Version_1.0 -> Version_1.26: 9 added, 1 removed, "
+        "0 action changed",
+        "Summary: 1 error(s), 1 warning(s), 2 info",
+    ]
+
+
+def test_check_default_describe_nonexistent_warns(stub, load_fixture, capsys):
+    _add_list_responses(stub, load_fixture)
+    stub.add_client_error("describe_managed_rule_group", "WAFNonexistentItemException")
+
+    assert main(["check", "--web-acl-file", _fixture_path("web_acl_clean.json")]) == 0
+
+    assert capsys.readouterr().out.splitlines() == [
+        f"WARNING  {GROUP}  default-not-describable  default version Version_1.1 "
+        "cannot be described; comparisons that need it are skipped",
+        "Summary: 0 error(s), 1 warning(s), 0 info",
+    ]
+
+
+def test_check_default_describe_other_error_exits_2(stub, load_fixture, capsys):
+    _add_list_responses(stub, load_fixture)
+    stub.add_client_error("describe_managed_rule_group", "WAFAccessDeniedException")
+
+    assert main(["check", "--web-acl-file", _fixture_path("web_acl_clean.json")]) == 2
+
+    assert "WAFAccessDeniedException" in capsys.readouterr().err
+
+
 def test_check_api_json(stub, load_fixture, capsys):
     stub.add_response(
         "get_web_acl",
