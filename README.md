@@ -13,6 +13,16 @@ When you move a web ACL to a newer static version of an AWS Managed Rules rule g
 
 `waf-upgrade-check` reads the rule group versions and your web ACL, and reports these before you upgrade. It only calls read APIs.
 
+### ☕ Found it useful? Buy me a coffee
+
+If this project saves you time, a coffee keeps it maintained. Any amount helps. More
+options on the [donate page](https://dakiquang.github.io/donate/).
+
+| MoMo · VietQR | PayPal |
+|:---:|:---:|
+| <img src="https://dakiquang.github.io/donate/images/qr-momo.png" width="180" alt="MoMo and VietQR code"> | <img src="https://dakiquang.github.io/donate/images/qr-paypal.png" width="180" alt="PayPal QR code"> |
+| [![Mở MoMo](https://img.shields.io/badge/M%E1%BB%9F%20MoMo-%E2%86%92-A50064?style=for-the-badge)](https://me.momo.vn/dakiquang) | [![Open PayPal](https://img.shields.io/badge/Open%20PayPal-%E2%86%92-0070BA?style=for-the-badge&logo=paypal&logoColor=white)](https://paypal.me/dakiquang) |
+
 ## Use with AWS MCP
 
 Add the agent skill to your coding agent with the [skills CLI](https://github.com/vercel-labs/skills):
