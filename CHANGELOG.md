@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `check` reports `labels-not-listed` (warning) when the version in use lists no `AvailableLabels` and a later rule in the web ACL matches a label, so label changes could not be checked.
+
 ## [0.1.0] - 2026-11-14
 
 ### Added

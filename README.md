@@ -114,6 +114,7 @@ Findings:
 
 - `override-missing-rule` (error): a `RuleActionOverrides` or `ExcludedRules` entry names a rule that the target version does not have.
 - `label-no-longer-emitted` (error): another rule matches a label or label namespace that the version in use adds and the target version does not.
+- `labels-not-listed` (warning): the version in use lists no labels and a later rule matches a label, so `label-no-longer-emitted` could not compare labels. Reported once per managed rule group reference, and not when the target is the version in use.
 - `version-unavailable` (error): the pinned version is no longer listed as available.
 - `capacity-increase` (warning): the target version needs more WCU than the version in use.
 - `default-not-describable` (warning): the default version is not listed or cannot be described ([`DescribeManagedRuleGroup`](https://docs.aws.amazon.com/waf/latest/APIReference/API_DescribeManagedRuleGroup.html)), so comparisons that need it are skipped.
@@ -206,7 +207,7 @@ The AWS MCP Server may need permissions of its own to sign you in and to run cal
 - **Rule actions are the only rule detail compared.** `DescribeManagedRuleGroup` returns rule summaries with a name and an action only ([`RuleSummary`](https://docs.aws.amazon.com/waf/latest/APIReference/API_RuleSummary.html)). A version that changes what a rule detects without renaming it shows no finding. Read the [AWS Managed Rules changelog](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-changelog.html) for those changes; for the core rule set and other [baseline rule groups](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-baseline.html) many entries read "Improved detection signatures".
 - **Label rules inside your own rule groups are not checked.** Rules in a rule group referenced with [`RuleGroupReferenceStatement`](https://docs.aws.amazon.com/waf/latest/APIReference/API_RuleGroupReferenceStatement.html) can match labels too; only rules in the web ACL itself are checked.
 - **Firewall Manager rule groups are not checked.** Rule groups that a [Firewall Manager AWS WAF policy](https://docs.aws.amazon.com/waf/latest/developerguide/waf-policies.html) adds to a web ACL (`PreProcessFirewallManagerRuleGroups` and `PostProcessFirewallManagerRuleGroups` in [`WebACL`](https://docs.aws.amazon.com/waf/latest/APIReference/API_WebACL.html)) are not part of this check, and their rules are not checked as label consumers.
-- **Some old versions list no labels.** `DescribeManagedRuleGroup` returned no `AvailableLabels` for `AWSManagedRulesCommonRuleSet` `Version_1.0` (checked 2026-11-14). When the pinned version lists no labels, `label-no-longer-emitted` cannot tell which labels the target version stopped emitting.
+- **Some old versions list no labels.** `DescribeManagedRuleGroup` returned no `AvailableLabels` for `AWSManagedRulesCommonRuleSet` `Version_1.0` (checked 2026-11-14). When the pinned version lists no labels, `label-no-longer-emitted` cannot tell which labels the target version stopped emitting; `check` reports `labels-not-listed` (warning) instead when a later rule matches a label.
 
 ## License
 
