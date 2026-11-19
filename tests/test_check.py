@@ -267,6 +267,76 @@ def test_label_dependency_needs_fully_qualified_key(scope, key, expected):
     assert len(findings) == expected
 
 
+# labels-not-listed
+
+
+def test_labels_not_listed_warns_once_for_later_label_rule():
+    old = version("Version_1.0")
+    new = version("Version_1.1", labels=[NS + "X"])
+    acl = web_acl(
+        managed_rule("Version_1.0", priority=1),
+        {"Name": "UsesLabel", "Priority": 2, "Statement": label(NS + "X")},
+        {"Name": "UsesNamespace", "Priority": 3, "Statement": label(NS, scope="NAMESPACE")},
+    )
+
+    findings = check_web_acl(acl, catalogs(old, new), "Version_1.1")
+    [finding] = by_code(findings, "labels-not-listed")
+
+    assert finding.level == "warning"
+    assert finding.rule_group == GROUP
+    assert finding.message == "Version_1.0 lists no labels; label changes could not be checked"
+    assert finding.details == {
+        "rule": "AWS-CRS",
+        "in_use_version": "Version_1.0",
+        "target_version": "Version_1.1",
+    }
+    assert by_code(findings, "label-no-longer-emitted") == []
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        [managed_rule("Version_1.0")],
+        [
+            managed_rule("Version_1.0", priority=5),
+            {"Name": "UsesLabel", "Priority": 3, "Statement": label(NS + "X")},
+        ],
+    ],
+    ids=["no-other-rule", "label-rule-before-managed"],
+)
+def test_labels_not_listed_without_later_label_rule_not_reported(rules):
+    old = version("Version_1.0")
+    new = version("Version_1.1", labels=[NS + "X"])
+
+    findings = check_web_acl(web_acl(*rules), catalogs(old, new), "Version_1.1")
+
+    assert by_code(findings, "labels-not-listed") == []
+
+
+def test_labels_not_listed_same_version_not_reported():
+    old = version("Version_1.0")
+    acl = web_acl(
+        managed_rule("Version_1.0", priority=1),
+        {"Name": "UsesLabel", "Priority": 2, "Statement": label(NS + "X")},
+    )
+
+    findings = check_web_acl(acl, catalogs(old), "Version_1.0")
+
+    assert by_code(findings, "labels-not-listed") == []
+
+
+def test_labels_listed_not_reported(v1_0, v1_1):
+    acl = web_acl(
+        managed_rule("Version_1.0"),
+        {"Name": "UsesLabel", "Statement": label(NS + "LegacyRule_QueryArguments")},
+    )
+
+    findings = check_web_acl(acl, catalogs(v1_0, v1_1), "default")
+
+    assert by_code(findings, "labels-not-listed") == []
+    assert len(by_code(findings, "label-no-longer-emitted")) == 1
+
+
 # version-unavailable
 
 

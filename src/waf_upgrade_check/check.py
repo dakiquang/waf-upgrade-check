@@ -161,6 +161,19 @@ def _override_missing_rule(ref: ManagedRef, target: RuleGroupVersion) -> list[Fi
     ]
 
 
+def _later_rules(
+    ref: ManagedRef, rules: Sequence[Mapping[str, Any]]
+) -> Iterator[Mapping[str, Any]]:
+    """Yield the web ACL rules that run after the managed rule group reference."""
+    for rule in rules:
+        if rule["Name"] == ref.rule_name:
+            continue
+        priority = rule.get("Priority")
+        if priority is not None and ref.priority is not None and priority <= ref.priority:
+            continue
+        yield rule
+
+
 def _label_no_longer_emitted(
     ref: ManagedRef,
     rules: Sequence[Mapping[str, Any]],
@@ -168,12 +181,7 @@ def _label_no_longer_emitted(
     target: RuleGroupVersion,
 ) -> list[Finding]:
     findings = []
-    for rule in rules:
-        if rule["Name"] == ref.rule_name:
-            continue
-        priority = rule.get("Priority")
-        if priority is not None and ref.priority is not None and priority <= ref.priority:
-            continue
+    for rule in _later_rules(ref, rules):
         seen = set()
         for scope, key in _label_matches(rule.get("Statement", {})):
             if key in seen or not _emits(in_use, scope, key) or _emits(target, scope, key):
@@ -196,6 +204,29 @@ def _label_no_longer_emitted(
                 )
             )
     return findings
+
+
+def _labels_not_listed(
+    ref: ManagedRef,
+    rules: Sequence[Mapping[str, Any]],
+    in_use: RuleGroupVersion,
+    target: RuleGroupVersion,
+) -> list[Finding]:
+    if in_use.available_labels or target.name == in_use.name:
+        return []
+    if not any(
+        True for rule in _later_rules(ref, rules) for _ in _label_matches(rule.get("Statement", {}))
+    ):
+        return []
+    return [
+        Finding(
+            "labels-not-listed",
+            "warning",
+            ref.group,
+            f"{in_use.name} lists no labels; label changes could not be checked",
+            {"rule": ref.rule_name, "in_use_version": in_use.name, "target_version": target.name},
+        )
+    ]
 
 
 def _version_unavailable(ref: ManagedRef, catalog: RuleGroupCatalog) -> list[Finding]:
@@ -327,6 +358,7 @@ def check_web_acl(
             findings += _override_missing_rule(ref, wanted)
         if in_use is not None and wanted is not None:
             findings += _label_no_longer_emitted(ref, rules, in_use, wanted)
+            findings += _labels_not_listed(ref, rules, in_use, wanted)
             findings += _capacity_increase(ref, in_use, wanted, acl.get("Capacity"))
             findings += _rules_changed(ref, in_use, wanted)
     return sorted(findings, key=lambda f: (LEVELS.index(f.level), f.rule_group, f.code))
