@@ -71,3 +71,8 @@ def describe(
 def get_web_acl(client: Any, name: str, acl_id: str, scope: str) -> dict[str, Any]:
     """Return the ``GetWebACL`` response (``WebACL`` and ``LockToken``)."""
     return client.get_web_acl(Name=name, Scope=scope, Id=acl_id)
+
+
+def get_rule_group(client: Any, arn: str) -> dict[str, Any]:
+    """Return the read-only ``GetRuleGroup`` response (``RuleGroup`` and ``LockToken``)."""
+    return client.get_rule_group(ARN=arn)

@@ -337,6 +337,122 @@ def test_labels_listed_not_reported(v1_0, v1_1):
     assert len(by_code(findings, "label-no-longer-emitted")) == 1
 
 
+# rule groups referenced with RuleGroupReferenceStatement
+
+ARN = (
+    "arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/example-label-rules/"
+    "b2c3d4e5-6789-0abc-def1-EXAMPLE33333"
+)
+
+
+def rule_group_ref(name, arn=ARN, priority=None):
+    rule = {"Name": name, "Statement": {"RuleGroupReferenceStatement": {"ARN": arn}}}
+    if priority is not None:
+        rule["Priority"] = priority
+    return rule
+
+
+def rule_group(name, *rules):
+    return {"Name": name, "ARN": ARN, "Rules": list(rules)}
+
+
+def test_label_consumed_in_referenced_rule_group(v1_0, v1_1):
+    acl = web_acl(managed_rule("Version_1.0", priority=1), rule_group_ref("Own-Rules", priority=2))
+    inner = {
+        "Name": "BlockLegacyInGroup",
+        "Priority": 0,
+        "Statement": label(NS + "LegacyRule_QueryArguments"),
+    }
+    referenced = {ARN: rule_group("example-label-rules", inner)}
+
+    findings = check_web_acl(acl, catalogs(v1_0, v1_1), "default", referenced)
+    [finding] = by_code(findings, "label-no-longer-emitted")
+
+    assert finding.level == "error"
+    assert finding.rule_group == GROUP
+    assert finding.message == (
+        f"rule example-label-rules/BlockLegacyInGroup matches LABEL "
+        f"{NS}LegacyRule_QueryArguments, not emitted by Version_1.1"
+    )
+    assert finding.details == {
+        "rule": "example-label-rules/BlockLegacyInGroup",
+        "managed_rule": "AWS-CRS",
+        "scope": "LABEL",
+        "key": NS + "LegacyRule_QueryArguments",
+        "in_use_version": "Version_1.0",
+        "target_version": "Version_1.1",
+    }
+    assert by_code(findings, "rule-group-not-checked") == []
+
+
+@pytest.mark.parametrize(
+    ("managed_priority", "reference_priority", "expected"),
+    [(5, 3, 0), (5, 7, 1), (5, None, 1)],
+    ids=["reference-before", "reference-after", "reference-without-priority"],
+)
+def test_referenced_rule_group_runs_before_managed_not_reported(
+    managed_priority, reference_priority, expected
+):
+    old = version("Version_1.0", labels=[NS + "X"])
+    new = version("Version_1.1")
+    acl = web_acl(
+        managed_rule("Version_1.0", priority=managed_priority),
+        rule_group_ref("Own-Rules", priority=reference_priority),
+    )
+    inner = {"Name": "UsesLabel", "Priority": 99, "Statement": label(NS + "X")}
+    referenced = {ARN: rule_group("example-label-rules", inner)}
+
+    findings = check_web_acl(acl, catalogs(old, new), "default", referenced)
+
+    assert len(by_code(findings, "label-no-longer-emitted")) == expected
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [label(NS + "NoUserAgent_Header"), label(NS, scope="NAMESPACE")],
+    ids=["label-still-emitted", "namespace-still-covered"],
+)
+def test_label_still_emitted_in_referenced_group_not_reported(v1_0, v1_1, statement):
+    acl = web_acl(managed_rule("Version_1.0"), rule_group_ref("Own-Rules"))
+    referenced = {
+        ARN: rule_group("example-label-rules", {"Name": "UsesLabel", "Statement": statement})
+    }
+
+    findings = check_web_acl(acl, catalogs(v1_0, v1_1), "default", referenced)
+
+    assert by_code(findings, "label-no-longer-emitted") == []
+
+
+def test_referenced_rule_group_not_fetched_noted(v1_0, v1_1):
+    acl = web_acl(managed_rule("Version_1.0"), rule_group_ref("Own-Rules"))
+
+    findings = check_web_acl(acl, catalogs(v1_0, v1_1), "default", {})
+
+    [finding] = by_code(findings, "rule-group-not-checked")
+    assert finding.level == "warning"
+    assert finding.rule_group == ARN
+    assert finding.message == (
+        f"rule Own-Rules references rule group {ARN}, which was not fetched; "
+        "its rules were not checked"
+    )
+    assert finding.details == {"rule": "Own-Rules", "arn": ARN}
+    assert by_code(findings, "label-no-longer-emitted") == []
+    assert [f for f in findings if f.level == "error"] == []
+
+
+def test_labels_not_listed_counts_rules_in_referenced_group():
+    old = version("Version_1.0")
+    new = version("Version_1.1", labels=[NS + "X"])
+    acl = web_acl(managed_rule("Version_1.0", priority=1), rule_group_ref("Own-Rules", priority=2))
+    referenced = {
+        ARN: rule_group("example-label-rules", {"Name": "UsesLabel", "Statement": label(NS + "X")})
+    }
+
+    findings = check_web_acl(acl, catalogs(old, new), "Version_1.1", referenced)
+
+    assert len(by_code(findings, "labels-not-listed")) == 1
+
+
 # version-unavailable
 
 

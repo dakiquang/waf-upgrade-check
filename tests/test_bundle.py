@@ -1,6 +1,7 @@
 import copy
 import datetime
 import json
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,11 @@ from waf_upgrade_check.cli import main
 from waf_upgrade_check.model import RuleGroupVersion
 
 GROUP = "AWSManagedRulesCommonRuleSet"
+ARN = (
+    "arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/example-label-rules/"
+    "b2c3d4e5-6789-0abc-def1-EXAMPLE33333"
+)
+RULE_GROUP_RESPONSE = Path(__file__).parent / "fixtures" / "rule_group_labels.json"
 
 
 def _iso(stamp):
@@ -75,6 +81,25 @@ def _managed(data):
     return data["web_acl"]["WebACL"]["Rules"][0]["Statement"]["ManagedRuleGroupStatement"]
 
 
+def _reference(data, arn=ARN):
+    """Append a rule that references the rule group ``arn`` after every other rule."""
+    data["web_acl"]["WebACL"]["Rules"].append(
+        {
+            "Name": "Own-Rules",
+            "Priority": 4,
+            "Statement": {"RuleGroupReferenceStatement": {"ARN": arn}},
+            "OverrideAction": {"None": {}},
+        }
+    )
+
+
+def _referenced(data):
+    """Add the example ``GetRuleGroup`` response to the bundle; return its ``RuleGroup``."""
+    response = json.loads(RULE_GROUP_RESPONSE.read_text())
+    data.setdefault("referenced_rule_groups", {})[ARN] = response
+    return response["RuleGroup"]
+
+
 MUTATIONS = [
     ("wrong format", lambda d: d.update(format="other/v9"), "has format other/v9; expected"),
     ("format missing", lambda d: d.pop("format"), "is missing format"),
@@ -123,6 +148,36 @@ MUTATIONS = [
         f"has no rule_groups entry for {GROUP}; run collect-script again",
     ),
     ("caller not an object", lambda d: d.update(caller="123"), "has caller that is not an object"),
+    (
+        "referenced_rule_groups not an object",
+        lambda d: d.update(referenced_rule_groups=[]),
+        "has referenced_rule_groups that is not an object",
+    ),
+    (
+        "referenced entry without RuleGroup",
+        lambda d: d.update(referenced_rule_groups={ARN: {"LockToken": "token"}}),
+        f"is missing referenced_rule_groups.{ARN}.RuleGroup",
+    ),
+    (
+        "referenced Rules not a list",
+        lambda d: _referenced(d).update(Rules={}),
+        f"has referenced_rule_groups.{ARN}.RuleGroup.Rules that is not a list",
+    ),
+    (
+        "referenced rule Statement not an object",
+        lambda d: _referenced(d)["Rules"][0].update(Statement=[]),
+        f"has referenced_rule_groups.{ARN}.RuleGroup.Rules[0].Statement that is not an object",
+    ),
+    (
+        "referenced ARN mismatch",
+        lambda d: _referenced(d).update(ARN="arn:aws:wafv2:other"),
+        f"has referenced_rule_groups.{ARN} with RuleGroup.ARN arn:aws:wafv2:other",
+    ),
+    (
+        "reference without ARN",
+        lambda d: _reference(d, arn=None),
+        "has web_acl.WebACL.Rules[4].Statement.RuleGroupReferenceStatement without an ARN string",
+    ),
 ]
 
 
@@ -287,5 +342,89 @@ def test_check_bundle_missing_listed_default_warns(
     assert capsys.readouterr().out.splitlines() == [
         f"WARNING  {GROUP}  default-not-describable  default version Version_1.1 "
         "cannot be described; comparisons that need it are skipped",
+        "Summary: 0 error(s), 1 warning(s), 0 info",
+    ]
+
+
+UPGRADE_FINDINGS = [
+    f"ERROR  {GROUP}  label-no-longer-emitted  rule BlockLegacyLabel matches LABEL "
+    "awswaf:managed:aws:core-rule-set:LegacyRule_QueryArguments, not emitted by Version_1.1",
+    f"ERROR  {GROUP}  override-missing-rule  RuleActionOverrides entry "
+    "LegacyRule_QUERYARGUMENTS in rule AWS-CRS is not a rule in Version_1.1",
+    f"WARNING  {GROUP}  capacity-increase  capacity 700 -> 750 WCU (+50); web ACL capacity 900",
+    f"INFO  {GROUP}  behind-default  pinned version Version_1.0 differs from default Version_1.1",
+    f"INFO  {GROUP}  rules-changed  Version_1.0 -> Version_1.1: 1 added, 1 removed, "
+    "1 action changed",
+]
+NOT_CHECKED = (
+    f"WARNING  {ARN}  rule-group-not-checked  rule Own-Rules references rule group {ARN}, "
+    "which was not fetched; its rules were not checked"
+)
+
+
+def test_load_bundle_without_referenced_rule_groups(no_client, bundle, tmp_path, capsys):
+    path = _write(tmp_path, bundle)
+
+    assert load_bundle(path).referenced == {}
+    assert main(["check", "--bundle", path]) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        *UPGRADE_FINDINGS,
+        "Summary: 2 error(s), 1 warning(s), 2 info",
+    ]
+
+
+def test_load_bundle_with_referenced_rule_groups(bundle, load_fixture, tmp_path):
+    _reference(bundle)
+    _referenced(bundle)
+
+    loaded = load_bundle(_write(tmp_path, bundle))
+
+    assert loaded.referenced == {ARN: load_fixture("rule_group_labels.json")["RuleGroup"]}
+
+
+def test_check_bundle_reports_label_in_referenced_rule_group(no_client, bundle, tmp_path, capsys):
+    _reference(bundle)
+    _referenced(bundle)
+
+    assert main(["check", "--bundle", _write(tmp_path, bundle)]) == 1
+
+    assert capsys.readouterr().out.splitlines() == [
+        UPGRADE_FINDINGS[0],
+        f"ERROR  {GROUP}  label-no-longer-emitted  rule example-label-rules/BlockLegacyInGroup "
+        "matches LABEL awswaf:managed:aws:core-rule-set:LegacyRule_QueryArguments, "
+        "not emitted by Version_1.1",
+        *UPGRADE_FINDINGS[1:],
+        "Summary: 3 error(s), 1 warning(s), 2 info",
+    ]
+
+
+@pytest.mark.parametrize("referenced", [None, {}], ids=["key-missing", "key-empty"])
+def test_check_bundle_referenced_rule_group_missing_notes_not_checked(
+    no_client, bundle, tmp_path, capsys, referenced
+):
+    _reference(bundle)
+    if referenced is not None:
+        bundle["referenced_rule_groups"] = referenced
+
+    assert main(["check", "--bundle", _write(tmp_path, bundle)]) == 1
+
+    assert capsys.readouterr().out.splitlines() == [
+        *UPGRADE_FINDINGS[:3],
+        NOT_CHECKED,
+        *UPGRADE_FINDINGS[3:],
+        "Summary: 2 error(s), 2 warning(s), 2 info",
+    ]
+
+
+def test_check_clean_bundle_referenced_rule_group_missing_exits_0(
+    no_client, bundle, load_fixture, tmp_path, capsys
+):
+    bundle["web_acl"] = load_fixture("web_acl_clean.json")
+    _reference(bundle)
+
+    assert main(["check", "--bundle", _write(tmp_path, bundle)]) == 0
+
+    assert capsys.readouterr().out.splitlines() == [
+        NOT_CHECKED,
         "Summary: 0 error(s), 1 warning(s), 0 info",
     ]

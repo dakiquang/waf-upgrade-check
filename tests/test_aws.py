@@ -5,6 +5,10 @@ from botocore.stub import Stubber
 from waf_upgrade_check import aws
 
 GROUP = "AWSManagedRulesCommonRuleSet"
+ARN = (
+    "arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/example-label-rules/"
+    "b2c3d4e5-6789-0abc-def1-EXAMPLE33333"
+)
 
 
 def test_list_versions_follows_pagination(wafv2_client, load_fixture):
@@ -63,6 +67,18 @@ def test_get_web_acl_requests_name_scope_and_id(wafv2_client, load_fixture):
 
         stub.assert_no_pending_responses()
     assert result["WebACL"] == response["WebACL"]
+
+
+def test_get_rule_group_requests_by_arn(wafv2_client, load_fixture):
+    response = load_fixture("rule_group_labels.json")
+    with Stubber(wafv2_client) as stub:
+        stub.add_response("get_rule_group", response, {"ARN": ARN})
+
+        result = aws.get_rule_group(wafv2_client, ARN)
+
+        stub.assert_no_pending_responses()
+    assert result["RuleGroup"] == response["RuleGroup"]
+    assert result["LockToken"] == response["LockToken"]
 
 
 def test_describe_requests_the_given_version(wafv2_client, load_fixture):

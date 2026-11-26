@@ -22,6 +22,7 @@ class BundleError(ValueError):
 class Bundle:
     web_acl: dict[str, Any]
     catalogs: dict[str, RuleGroupCatalog]
+    referenced: dict[str, dict[str, Any]]
 
 
 def _object(path: str, parent: Mapping[str, Any], key: str, dotted: str) -> dict[str, Any]:
@@ -78,6 +79,22 @@ def _check_statement(path: str, statement: Mapping[str, Any], dotted: str) -> No
         _check_statement(path, child, where)
 
 
+def _check_rule(path: str, rule: Any, dotted: str) -> dict[str, Any]:
+    """Check the shape of one rule that ``check`` traverses; return its statement."""
+    if not isinstance(rule, dict):
+        raise BundleError(f"bundle file {path} has {dotted} that is not an object")
+    if "Name" not in rule:
+        raise BundleError(f"bundle file {path} is missing {dotted}.Name")
+    priority = rule.get("Priority")
+    if priority is not None and (not isinstance(priority, int) or isinstance(priority, bool)):
+        raise BundleError(f"bundle file {path} has {dotted}.Priority that is not an integer")
+    statement = rule.get("Statement", {})
+    if not isinstance(statement, dict):
+        raise BundleError(f"bundle file {path} has {dotted}.Statement that is not an object")
+    _check_statement(path, statement, f"{dotted}.Statement")
+    return statement
+
+
 def _check_rules(path: str, acl: Mapping[str, Any]) -> None:
     """Check the rule structure that ``managed_references`` and ``check`` traverse."""
     rules = acl.get("Rules", [])
@@ -85,17 +102,14 @@ def _check_rules(path: str, acl: Mapping[str, Any]) -> None:
         raise BundleError(f"bundle file {path} has web_acl.WebACL.Rules that is not a list")
     for index, rule in enumerate(rules):
         dotted = f"web_acl.WebACL.Rules[{index}]"
-        if not isinstance(rule, dict):
-            raise BundleError(f"bundle file {path} has {dotted} that is not an object")
-        if "Name" not in rule:
-            raise BundleError(f"bundle file {path} is missing {dotted}.Name")
-        priority = rule.get("Priority")
-        if priority is not None and (not isinstance(priority, int) or isinstance(priority, bool)):
-            raise BundleError(f"bundle file {path} has {dotted}.Priority that is not an integer")
-        statement = rule.get("Statement", {})
-        if not isinstance(statement, dict):
-            raise BundleError(f"bundle file {path} has {dotted}.Statement that is not an object")
-        _check_statement(path, statement, f"{dotted}.Statement")
+        statement = _check_rule(path, rule, dotted)
+        if "RuleGroupReferenceStatement" in statement:
+            reference = statement["RuleGroupReferenceStatement"]
+            if not isinstance(reference, dict) or not isinstance(reference.get("ARN"), str):
+                raise BundleError(
+                    f"bundle file {path} has {dotted}.Statement.RuleGroupReferenceStatement "
+                    "without an ARN string"
+                )
         managed = statement.get("ManagedRuleGroupStatement")
         dotted += ".Statement.ManagedRuleGroupStatement"
         if managed is None:
@@ -115,6 +129,34 @@ def _check_rules(path: str, acl: Mapping[str, Any]) -> None:
                     raise BundleError(
                         f"bundle file {path} has {dotted}.{key}[{position}] without Name"
                     )
+
+
+def _referenced(path: str, data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return ARN -> ``RuleGroup`` from the optional ``referenced_rule_groups`` key."""
+    if "referenced_rule_groups" not in data:
+        return {}
+    entries = data["referenced_rule_groups"]
+    if not isinstance(entries, dict):
+        raise BundleError(f"bundle file {path} has referenced_rule_groups that is not an object")
+    referenced = {}
+    for arn, entry in entries.items():
+        prefix = f"referenced_rule_groups.{arn}"
+        if not isinstance(entry, dict):
+            raise BundleError(f"bundle file {path} has {prefix} that is not an object")
+        group = _object(path, entry, "RuleGroup", f"{prefix}.RuleGroup")
+        if not isinstance(group.get("Name"), str):
+            raise BundleError(
+                f"bundle file {path} has {prefix}.RuleGroup.Name that is not a string"
+            )
+        if "ARN" in group and group["ARN"] != arn:
+            raise BundleError(f"bundle file {path} has {prefix} with RuleGroup.ARN {group['ARN']}")
+        rules = group.get("Rules", [])
+        if not isinstance(rules, list):
+            raise BundleError(f"bundle file {path} has {prefix}.RuleGroup.Rules that is not a list")
+        for index, rule in enumerate(rules):
+            _check_rule(path, rule, f"{prefix}.RuleGroup.Rules[{index}]")
+        referenced[arn] = group
+    return referenced
 
 
 def _catalog(path: str, group: str, entry: Any) -> RuleGroupCatalog:
@@ -203,4 +245,4 @@ def load_bundle(path: str) -> Bundle:
                 f"bundle file {path} has no rule_groups entry for {ref.group}; "
                 "run collect-script again"
             )
-    return Bundle(web_acl, catalogs)
+    return Bundle(web_acl, catalogs, _referenced(path, data))

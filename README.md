@@ -47,8 +47,8 @@ You:   Is it safe to move example-web-acl to the default CommonRuleSet version?
 Agent: AWS account 123456789012 (arn:aws:iam::123456789012:user/example). Check web ACL
        example-web-acl, ID a1b2c3d4-..., REGIONAL in eu-west-1, target default?
 You:   Yes.
-Agent: Read-only calls: GetCallerIdentity, GetWebACL, ListAvailableManagedRuleGroupVersions,
-       DescribeManagedRuleGroup.
+Agent: Read-only calls: GetCallerIdentity, GetWebACL, GetRuleGroup,
+       ListAvailableManagedRuleGroupVersions, DescribeManagedRuleGroup.
 Agent: 2 errors. AWS-CRS overrides LegacyRule_QUERYARGUMENTS, which Version_1.1 removes; rule
        BlockLegacyLabel matches a label Version_1.1 no longer adds. Options: drop the override,
        update BlockLegacyLabel, or stay pinned on Version_1.0. Also: +50 WCU (700 -> 750).
@@ -113,8 +113,9 @@ Summary: 2 error(s), 1 warning(s), 2 info
 Findings:
 
 - `override-missing-rule` (error): a `RuleActionOverrides` or `ExcludedRules` entry names a rule that the target version does not have.
-- `label-no-longer-emitted` (error): another rule matches a label or label namespace that the version in use adds and the target version does not.
+- `label-no-longer-emitted` (error): another rule matches a label or label namespace that the version in use adds and the target version does not. The rules in a rule group that the web ACL references with [`RuleGroupReferenceStatement`](https://docs.aws.amazon.com/waf/latest/APIReference/API_RuleGroupReferenceStatement.html) count too, at the priority of the referencing rule, and are named `<rule group name>/<rule name>`.
 - `labels-not-listed` (warning): the version in use lists no labels and a later rule matches a label, so `label-no-longer-emitted` could not compare labels. Reported once per managed rule group reference, and not when the target is the version in use.
+- `rule-group-not-checked` (warning): a rule references a rule group that could not be read with [`GetRuleGroup`](https://docs.aws.amazon.com/waf/latest/APIReference/API_GetRuleGroup.html) or that the bundle does not include, so the rules in it were not checked. Reported once per referencing rule; it does not change the exit code.
 - `version-unavailable` (error): the pinned version is no longer listed as available.
 - `capacity-increase` (warning): the target version needs more WCU than the version in use.
 - `default-not-describable` (warning): the default version is not listed or cannot be described ([`DescribeManagedRuleGroup`](https://docs.aws.amazon.com/waf/latest/APIReference/API_DescribeManagedRuleGroup.html)), so comparisons that need it are skipped.
@@ -125,6 +126,8 @@ Findings:
 
 Print a read-only Python snippet for the AWS MCP Server `run_script` tool. Run it unchanged; its `return_value` is a bundle (format `waf-upgrade-check/bundle/v1`) with the web ACL, the version list of each AWS managed rule group in it, and the descriptions of the versions in use and of the target. Save it as JSON outside your repository and pass it to `check --bundle`.
 
+The bundle also has the optional key `referenced_rule_groups`: the ARN of each rule group that the web ACL references with `RuleGroupReferenceStatement`, mapped to its `GetRuleGroup` response. A rule group the snippet cannot read is left out. `check` reports a rule group missing from the key, or a bundle without the key, as `rule-group-not-checked`. The format is unchanged, and bundles without the key stay valid.
+
 ```console
 $ waf-upgrade-check collect-script --web-acl example-web-acl --id ID --region eu-west-1 --target default
 $ waf-upgrade-check collect-script --web-acl-file web-acl.json --region eu-west-1
@@ -134,7 +137,7 @@ $ waf-upgrade-check collect-script --web-acl-file web-acl.json --region eu-west-
 - `--target`: as for `check`. Use the same target for `check --bundle`; the snippet describes only the versions that target needs.
 - `--scope` and `--region`: `--region` is required for `REGIONAL`; `CLOUDFRONT` always uses `us-east-1`.
 
-The snippet calls only [`GetCallerIdentity`](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html), `GetWebACL` (with `--web-acl`), `ListAvailableManagedRuleGroupVersions` and `DescribeManagedRuleGroup`.
+The snippet calls only [`GetCallerIdentity`](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetCallerIdentity.html), `GetWebACL` (with `--web-acl`), `GetRuleGroup`, `ListAvailableManagedRuleGroupVersions` and `DescribeManagedRuleGroup`.
 
 ## Options
 
@@ -192,6 +195,7 @@ The CLI and the snippet need only these actions ([AWS WAF V2 actions](https://do
         "wafv2:GetWebACL",
         "wafv2:ListAvailableManagedRuleGroupVersions",
         "wafv2:DescribeManagedRuleGroup",
+        "wafv2:GetRuleGroup",
         "sts:GetCallerIdentity"
       ],
       "Resource": "*"
@@ -205,7 +209,6 @@ The AWS MCP Server may need permissions of its own to sign you in and to run cal
 ## Known limits
 
 - **Rule actions are the only rule detail compared.** `DescribeManagedRuleGroup` returns rule summaries with a name and an action only ([`RuleSummary`](https://docs.aws.amazon.com/waf/latest/APIReference/API_RuleSummary.html)). A version that changes what a rule detects without renaming it shows no finding. Read the [AWS Managed Rules changelog](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-changelog.html) for those changes; for the core rule set and other [baseline rule groups](https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-baseline.html) many entries read "Improved detection signatures".
-- **Label rules inside your own rule groups are not checked.** Rules in a rule group referenced with [`RuleGroupReferenceStatement`](https://docs.aws.amazon.com/waf/latest/APIReference/API_RuleGroupReferenceStatement.html) can match labels too; only rules in the web ACL itself are checked.
 - **Firewall Manager rule groups are not checked.** Rule groups that a [Firewall Manager AWS WAF policy](https://docs.aws.amazon.com/waf/latest/developerguide/waf-policies.html) adds to a web ACL (`PreProcessFirewallManagerRuleGroups` and `PostProcessFirewallManagerRuleGroups` in [`WebACL`](https://docs.aws.amazon.com/waf/latest/APIReference/API_WebACL.html)) are not part of this check, and their rules are not checked as label consumers.
 - **Some old versions list no labels.** `DescribeManagedRuleGroup` returned no `AvailableLabels` for `AWSManagedRulesCommonRuleSet` `Version_1.0` (checked 2026-11-14). When the pinned version lists no labels, `label-no-longer-emitted` cannot tell which labels the target version stopped emitting; `check` reports `labels-not-listed` (warning) instead when a later rule matches a label.
 

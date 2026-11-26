@@ -1,0 +1,37 @@
+{
+  "RuleGroup": {
+    "Name": "example-label-rules",
+    "Id": "b2c3d4e5-6789-0abc-def1-EXAMPLE33333",
+    "ARN": "arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/example-label-rules/b2c3d4e5-6789-0abc-def1-EXAMPLE33333",
+    "Capacity": 10,
+    "Rules": [
+      {
+        "Name": "BlockLegacyInGroup",
+        "Priority": 99,
+        "Statement": {
+          "LabelMatchStatement": {
+            "Scope": "LABEL",
+            "Key": "awswaf:managed:aws:core-rule-set:LegacyRule_QueryArguments"
+          }
+        },
+        "Action": {"Block": {}},
+        "VisibilityConfig": {
+          "SampledRequestsEnabled": true,
+          "CloudWatchMetricsEnabled": true,
+          "MetricName": "BlockLegacyInGroup"
+        }
+      }
+    ],
+    "VisibilityConfig": {
+      "SampledRequestsEnabled": true,
+      "CloudWatchMetricsEnabled": true,
+      "MetricName": "example-label-rules"
+    },
+    "LabelNamespace": "awswaf:123456789012:rulegroup:example-label-rules:",
+    "AvailableLabels": [],
+    "ConsumedLabels": [
+      {"Name": "awswaf:managed:aws:core-rule-set:LegacyRule_QueryArguments"}
+    ]
+  },
+  "LockToken": "2579f3a5-6b7c-4d8e-9fa0-EXAMPLE44444"
+}
