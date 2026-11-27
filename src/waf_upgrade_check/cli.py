@@ -17,11 +17,13 @@ from .check import (
     LEVELS,
     Finding,
     ManagedRef,
+    ReferenceInputError,
     RuleGroupCatalog,
     TargetError,
     check_web_acl,
     managed_references,
     resolve_versions,
+    rule_group_references,
 )
 from .collect import build_script
 from .diff import VersionDiff, diff_versions
@@ -221,11 +223,27 @@ def _needed_versions(
 
 def _api_inputs(
     args: argparse.Namespace,
-) -> tuple[dict[str, Any], dict[str, RuleGroupCatalog]]:
+) -> tuple[dict[str, Any], dict[str, RuleGroupCatalog], dict[str, dict[str, Any]]]:
     web_acl = _read_web_acl(args.web_acl_file) if args.web_acl_file is not None else None
     client = _client(args)
     if web_acl is None:
         web_acl = aws.get_web_acl(client, args.web_acl, args.id, args.scope)
+
+    # A rule group that cannot be read is reported as not checked; it does not fail the run.
+    referenced: dict[str, dict[str, Any]] = {}
+    tried: set[str] = set()
+    try:
+        references = rule_group_references(web_acl)
+    except ReferenceInputError as exc:
+        raise UsageError(str(exc)) from exc
+    for reference in references:
+        if reference.arn in tried:
+            continue
+        tried.add(reference.arn)
+        try:
+            referenced[reference.arn] = aws.get_rule_group(client, reference.arn)["RuleGroup"]
+        except ClientError:
+            continue
 
     refs = managed_references(web_acl)
     listed: dict[str, tuple[str | None, Sequence[tuple[str, Any]]]] = {}
@@ -249,12 +267,12 @@ def _api_inputs(
         group: RuleGroupCatalog(default, tuple(available), described[group])
         for group, (default, available) in listed.items()
     }
-    return web_acl, catalogs
+    return web_acl, catalogs, referenced
 
 
 def _bundle_inputs(
     args: argparse.Namespace,
-) -> tuple[dict[str, Any], dict[str, RuleGroupCatalog]]:
+) -> tuple[dict[str, Any], dict[str, RuleGroupCatalog], dict[str, dict[str, Any]]]:
     try:
         bundle = load_bundle(args.bundle)
     except BundleError as exc:
@@ -268,7 +286,7 @@ def _bundle_inputs(
                 f"bundle file {args.bundle} has no description of {group} version {version}; "
                 f"describe it or run collect-script again with --target {args.target}"
             )
-    return bundle.web_acl, bundle.catalogs
+    return bundle.web_acl, bundle.catalogs, bundle.referenced
 
 
 def _cmd_check(args: argparse.Namespace, out: TextIO) -> int:
@@ -276,13 +294,13 @@ def _cmd_check(args: argparse.Namespace, out: TextIO) -> int:
         raise UsageError("--id cannot be used with --bundle")
     _check_id(args)
     if args.bundle is None:
-        web_acl, catalogs = _api_inputs(args)
-        findings = check_web_acl(web_acl, catalogs, args.target)
+        web_acl, catalogs, referenced = _api_inputs(args)
+        findings = check_web_acl(web_acl, catalogs, args.target, referenced)
     else:
         # A bundle is outside data: a shape load_bundle missed must still exit 2, not crash.
         try:
-            web_acl, catalogs = _bundle_inputs(args)
-            findings = check_web_acl(web_acl, catalogs, args.target)
+            web_acl, catalogs, referenced = _bundle_inputs(args)
+            findings = check_web_acl(web_acl, catalogs, args.target, referenced)
         except (TypeError, AttributeError, KeyError, ValueError) as exc:
             raise UsageError(
                 f"bundle file {args.bundle} has data check cannot use: {exc!r}"

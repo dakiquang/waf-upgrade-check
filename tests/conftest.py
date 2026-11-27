@@ -15,6 +15,10 @@ CRS = "AWSManagedRulesCommonRuleSet"
 KBI = "AWSManagedRulesKnownBadInputsRuleSet"
 WINDOWS = "AWSManagedRulesWindowsRuleSet"
 ACCOUNT = "123456789012"
+RULE_GROUP_ARN = (
+    "arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/example-label-rules/"
+    "b2c3d4e5-6789-0abc-def1-EXAMPLE33333"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -119,6 +123,7 @@ class FakeAws:
             (KBI, "Version_1.0"): load_fixture("aws/known_bad_inputs_v1_0.json"),
             (KBI, "Version_1.26"): load_fixture("aws/known_bad_inputs_v1_26.json"),
         }
+        self.rule_groups = {RULE_GROUP_ARN: load_fixture("rule_group_labels.json")}
 
     async def call_boto3(self, *, service_name, operation_name, region_name=None, params=None):
         params = params or {}
@@ -141,6 +146,10 @@ class FakeAws:
             if key in self.errors:
                 raise self.errors[key]
             response = self.describes.get(key)
+        elif (service_name, operation_name) == ("wafv2", "GetRuleGroup"):
+            if params.get("ARN") in self.errors:
+                raise self.errors[params["ARN"]]
+            response = self.rule_groups.get(params.get("ARN"))
         if response is None:
             raise AssertionError(f"unexpected call {service_name} {operation_name} {params}")
         return copy.deepcopy(response)

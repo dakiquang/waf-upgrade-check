@@ -10,10 +10,23 @@ from .bundle import FORMAT
 
 # The AWS MCP run_script validator rejects dunders, comprehensions and function definitions;
 # the body keeps to plain loops and calls. It reads the in-use version of every AWS managed
-# rule group in ``web_acl`` and the version that ``check --target TARGET`` resolves.
+# rule group in ``web_acl`` and the version that ``check --target TARGET`` resolves, and each
+# rule group a RuleGroupReferenceStatement references; one that cannot be read is left out.
 _BODY = """\
 identity = await call_boto3(service_name="sts", operation_name="GetCallerIdentity",
                             region_name=REGION, params={})
+arns = []
+for rule in web_acl["WebACL"].get("Rules", []):
+    reference = rule.get("Statement", {}).get("RuleGroupReferenceStatement")
+    if reference and reference.get("ARN") not in arns:
+        arns.append(reference.get("ARN"))
+referenced_rule_groups = {}
+for arn in arns:
+    try:
+        referenced_rule_groups[arn] = await call_boto3(service_name="wafv2",
+            operation_name="GetRuleGroup", region_name=REGION, params={"ARN": arn})
+    except Exception:
+        continue
 uses = {}
 for rule in web_acl["WebACL"].get("Rules", []):
     statement = rule.get("Statement", {}).get("ManagedRuleGroupStatement")
@@ -94,7 +107,8 @@ for group in uses:
                                             "Versions": entries},
                           "versions": described}
 result = {"format": FORMAT, "scope": SCOPE, "web_acl": web_acl,
-          "rule_groups": rule_groups, "caller": {"account": identity.get("Account")}}
+          "rule_groups": rule_groups, "referenced_rule_groups": referenced_rule_groups,
+          "caller": {"account": identity.get("Account")}}
 result
 """
 

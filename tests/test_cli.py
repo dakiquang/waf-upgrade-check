@@ -444,5 +444,91 @@ def test_check_bundle_matches_api_mode_with_undescribable_default(
     assert capsys.readouterr().out == api_output
 
 
+ARN = (
+    "arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/example-label-rules/"
+    "b2c3d4e5-6789-0abc-def1-EXAMPLE33333"
+)
+
+
+def _web_acl_with_references(tmp_path, load_fixture, *names):
+    """Write the upgrade web ACL plus one rule per name that references the example rule group."""
+    web_acl = load_fixture("web_acl_upgrade.json")
+    for priority, name in enumerate(names, start=4):
+        web_acl["WebACL"]["Rules"].append(
+            {
+                "Name": name,
+                "Priority": priority,
+                "Statement": {"RuleGroupReferenceStatement": {"ARN": ARN}},
+                "OverrideAction": {"None": {}},
+            }
+        )
+    path = tmp_path / "web-acl.json"
+    path.write_text(json.dumps(web_acl))
+    return str(path)
+
+
+def _add_file_responses(stub, load_fixture):
+    _add_list_responses(stub, load_fixture)
+    _add_describe(stub, load_fixture, "describe_v1_0.json", "Version_1.0")
+    _add_describe(stub, load_fixture, "describe_v1_1.json", "Version_1.1")
+
+
+def test_check_file_fetches_referenced_rule_group_once(stub, load_fixture, tmp_path, capsys):
+    path = _web_acl_with_references(tmp_path, load_fixture, "Own-Rules", "Own-Rules-Again")
+    stub.add_response("get_rule_group", load_fixture("rule_group_labels.json"), {"ARN": ARN})
+    _add_file_responses(stub, load_fixture)
+
+    assert main(["check", "--web-acl-file", path, "--format", "json"]) == 1
+
+    findings = json.loads(capsys.readouterr().out)
+    assert [f["details"]["rule"] for f in findings if f["code"] == "label-no-longer-emitted"] == [
+        "BlockLegacyLabel",
+        "example-label-rules/BlockLegacyInGroup",
+        "example-label-rules/BlockLegacyInGroup",
+    ]
+    assert [f for f in findings if f["code"] == "rule-group-not-checked"] == []
+
+
+def test_check_rule_group_client_error_notes_not_checked(stub, load_fixture, tmp_path, capsys):
+    path = _web_acl_with_references(tmp_path, load_fixture, "Own-Rules")
+    stub.add_client_error("get_rule_group", "WAFNonexistentItemException")
+    _add_file_responses(stub, load_fixture)
+
+    assert main(["check", "--web-acl-file", path, "--format", "json"]) == 1
+
+    findings = json.loads(capsys.readouterr().out)
+    assert [f for f in findings if f["code"] == "rule-group-not-checked"] == [
+        {
+            "code": "rule-group-not-checked",
+            "level": "warning",
+            "rule_group": ARN,
+            "message": f"rule Own-Rules references rule group {ARN}, which was not fetched; "
+            "its rules were not checked",
+            "details": {"rule": "Own-Rules", "arn": ARN},
+        }
+    ]
+    assert [f["details"]["rule"] for f in findings if f["code"] == "label-no-longer-emitted"] == [
+        "BlockLegacyLabel"
+    ]
+
+
+def test_check_bundle_matches_api_mode_with_referenced_rule_group(
+    stub, load_fixture, fake_aws, run_snippet, monkeypatch, tmp_path, capsys
+):
+    web_acl_path = _web_acl_with_references(tmp_path, load_fixture, "Own-Rules")
+    stub.add_response("get_rule_group", load_fixture("rule_group_labels.json"), {"ARN": ARN})
+    _add_file_responses(stub, load_fixture)
+    assert main(["check", "--web-acl-file", web_acl_path, "--format", "json"]) == 1
+    api_output = capsys.readouterr().out
+    assert "example-label-rules/BlockLegacyInGroup" in api_output
+    monkeypatch.setattr(aws, "make_client", _no_client)
+
+    argv = ["--web-acl-file", web_acl_path, "--region", "us-east-1"]
+    path = _check_bundle_from_snippet(argv, fake_aws, run_snippet, tmp_path, capsys)
+
+    assert main(["check", "--bundle", str(path), "--format", "json"]) == 1
+    assert capsys.readouterr().out == api_output
+
+
 def _no_client(scope, region, profile):
     raise AssertionError("client must not be created")

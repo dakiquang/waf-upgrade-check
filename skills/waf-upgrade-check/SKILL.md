@@ -44,10 +44,10 @@ the CLI checks it offline. You report findings and suggest changes; you never ch
    `--region` is required for `REGIONAL`. `CLOUDFRONT` always uses `us-east-1`.
 
 3. **Run the snippet unchanged** with `run_script`. Then check `api_calls`: it must contain only
-   `GetCallerIdentity`, `GetWebACL`, `ListAvailableManagedRuleGroupVersions` and
+   `GetCallerIdentity`, `GetWebACL`, `GetRuleGroup`, `ListAvailableManagedRuleGroupVersions` and
    `DescribeManagedRuleGroup`. A warning that pagination returned only the first page is
-   expected; the snippet follows `NextMarker` itself. If the validator rejects the snippet or an
-   API call fails, stop and report the error to the user. Do not rewrite the snippet. Compare
+   expected; the snippet follows `NextMarker` itself. If the validator rejects the snippet or the
+   snippet fails, stop and report the error to the user. Do not rewrite the snippet. Compare
    `return_value.caller.account` with the account the user confirmed in step 1; if they differ,
    the credentials changed between the two calls: stop, do not save or check the bundle, and
    tell the user.
@@ -81,5 +81,8 @@ the CLI checks it offline. You report findings and suggest changes; you never ch
 - Never call write APIs: no `Create*`, `Update*`, `Delete*`, `Put*`, `Associate*`,
   `Disassociate*`, `Tag*` or `Untag*`.
 - Never change the web ACL or apply an upgrade. Only suggest changes; the user applies them.
-- Label rules inside `RuleGroupReferenceStatement` rule groups and Firewall Manager policies are
-  not checked. Say so if the web ACL uses them.
+- Label rules in rule groups added by Firewall Manager policies are not checked. Say so if the
+  web ACL uses them.
+- A `GetRuleGroup` call that fails does not stop the snippet: it leaves that rule group out and
+  `check` reports `rule-group-not-checked`. Report that finding to the user as a coverage gap:
+  the rules in that referenced rule group were not checked.

@@ -20,7 +20,12 @@ READ_OPERATIONS = {
     "GetCallerIdentity",
     "ListAvailableManagedRuleGroupVersions",
     "DescribeManagedRuleGroup",
+    "GetRuleGroup",
 }
+ARN = (
+    "arn:aws:wafv2:us-east-1:123456789012:regional/rulegroup/example-label-rules/"
+    "b2c3d4e5-6789-0abc-def1-EXAMPLE33333"
+)
 
 
 def _snippet(capsys, *argv):
@@ -159,6 +164,53 @@ def test_other_describe_error_fails_the_snippet(no_client, fake_aws, run_snippet
 
     with pytest.raises(ClientError, match="WAFAccessDeniedException"):
         run_snippet(snippet, fake_aws.call_boto3)
+
+
+def _web_acl_with_references(tmp_path, load_fixture, *names):
+    """Write the upgrade web ACL plus one rule per name that references the example rule group."""
+    web_acl = load_fixture("web_acl_upgrade.json")
+    for priority, name in enumerate(names, start=4):
+        statement = {"RuleGroupReferenceStatement": {"ARN": ARN}}
+        web_acl["WebACL"]["Rules"].append(
+            {"Name": name, "Priority": priority, "Statement": statement}
+        )
+    path = tmp_path / "web-acl.json"
+    path.write_text(json.dumps(web_acl))
+    return str(path)
+
+
+def test_snippet_fetches_each_referenced_rule_group_once(
+    no_client, fake_aws, run_snippet, load_fixture, tmp_path, capsys
+):
+    path = _web_acl_with_references(tmp_path, load_fixture, "Own-Rules", "Own-Rules-Again")
+
+    bundle = run_snippet(
+        _snippet(capsys, "--web-acl-file", path, "--region", "us-east-1"), fake_aws.call_boto3
+    )
+
+    fetched = [params for _, operation, _, params in fake_aws.calls if operation == "GetRuleGroup"]
+    assert fetched == [{"ARN": ARN}]
+    assert bundle["referenced_rule_groups"] == {ARN: load_fixture("rule_group_labels.json")}
+
+
+def test_snippet_rule_group_error_left_out(
+    no_client, fake_aws, run_snippet, load_fixture, tmp_path, capsys
+):
+    fake_aws.errors[ARN] = fake_aws.client_error("AccessDeniedException", "GetRuleGroup")
+    path = _web_acl_with_references(tmp_path, load_fixture, "Own-Rules")
+
+    bundle = run_snippet(
+        _snippet(capsys, "--web-acl-file", path, "--region", "us-east-1"), fake_aws.call_boto3
+    )
+
+    assert bundle["referenced_rule_groups"] == {}
+    bundle_path = tmp_path / "bundle.json"
+    bundle_path.write_text(json.dumps(bundle))
+    assert main(["check", "--bundle", str(bundle_path)]) == 1
+    assert (
+        f"WARNING  {ARN}  rule-group-not-checked  rule Own-Rules references rule group {ARN}, "
+        "which was not fetched; its rules were not checked"
+    ) in capsys.readouterr().out.splitlines()
 
 
 def test_cloudfront_reads_us_east_1(no_client, fake_aws, run_snippet, capsys):

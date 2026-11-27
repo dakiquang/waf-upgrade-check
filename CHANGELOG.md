@@ -9,6 +9,12 @@ All notable changes to this project are documented here. The format follows
 ### Added
 
 - `check` reports `labels-not-listed` (warning) when the version in use lists no `AvailableLabels` and a later rule in the web ACL matches a label, so label changes could not be checked.
+- `check` checks the label rules in your own rule groups that the web ACL references with `RuleGroupReferenceStatement`: they count as label consumers at the priority of the referencing rule and are named `<rule group name>/<rule name>` in findings. API mode reads each rule group once with `GetRuleGroup` by ARN; bundles carry them in the optional key `referenced_rule_groups` (ARN to `GetRuleGroup` response), which `collect-script` collects. The bundle format stays `waf-upgrade-check/bundle/v1`.
+- `check` reports `rule-group-not-checked` (warning) for a rule that references a rule group that could not be read or is missing from the bundle.
+
+### Changed
+
+- The read-only IAM policy needs `wafv2:GetRuleGroup`. Without it, `check` and the snippet still run and report `rule-group-not-checked`.
 
 ## [0.1.0] - 2026-11-14
 

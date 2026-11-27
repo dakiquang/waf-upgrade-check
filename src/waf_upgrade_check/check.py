@@ -35,6 +35,15 @@ class ManagedRef:
 
 
 @dataclass(frozen=True)
+class RuleGroupRef:
+    """A web ACL rule with a ``RuleGroupReferenceStatement`` to one of your own rule groups."""
+
+    rule_name: str
+    arn: str
+    priority: int | None
+
+
+@dataclass(frozen=True)
 class RuleGroupCatalog:
     """What is known about one managed rule group.
 
@@ -46,6 +55,10 @@ class RuleGroupCatalog:
     default: str | None
     available: tuple[tuple[str, Any], ...]
     versions: Mapping[str, RuleGroupVersion]
+
+
+class ReferenceInputError(ValueError):
+    """A rule group reference has an invalid input shape."""
 
 
 class TargetError(ValueError):
@@ -74,6 +87,23 @@ def managed_references(web_acl: Mapping[str, Any]) -> list[ManagedRef]:
                 rule.get("Priority"),
             )
         )
+    return refs
+
+
+def rule_group_references(web_acl: Mapping[str, Any]) -> list[RuleGroupRef]:
+    """Return the rule group references in order; they only appear at the top level of a rule."""
+    refs = []
+    for rule in web_acl["WebACL"].get("Rules", []):
+        statement = rule.get("Statement", {})
+        if "RuleGroupReferenceStatement" not in statement:
+            continue
+        reference = statement["RuleGroupReferenceStatement"]
+        if not isinstance(reference, dict) or not isinstance(reference.get("ARN"), str):
+            raise ReferenceInputError(
+                f"rule {rule.get('Name', '<unnamed>')} has a "
+                "RuleGroupReferenceStatement without an ARN string"
+            )
+        refs.append(RuleGroupRef(rule["Name"], reference["ARN"], rule.get("Priority")))
     return refs
 
 
@@ -161,29 +191,43 @@ def _override_missing_rule(ref: ManagedRef, target: RuleGroupVersion) -> list[Fi
     ]
 
 
-def _later_rules(
-    ref: ManagedRef, rules: Sequence[Mapping[str, Any]]
-) -> Iterator[Mapping[str, Any]]:
-    """Yield the web ACL rules that run after the managed rule group reference."""
+def _later_consumers(
+    ref: ManagedRef,
+    rules: Sequence[Mapping[str, Any]],
+    referenced: Mapping[str, Mapping[str, Any]],
+) -> Iterator[tuple[str, Mapping[str, Any]]]:
+    """Yield ``(rule name, statement)`` for the rules that run after the managed rule group.
+
+    A web ACL rule that references a fetched rule group yields each rule in that group, named
+    ``<rule group name>/<rule name>``, at the priority of the referencing rule.
+    """
     for rule in rules:
         if rule["Name"] == ref.rule_name:
             continue
         priority = rule.get("Priority")
         if priority is not None and ref.priority is not None and priority <= ref.priority:
             continue
-        yield rule
+        statement = rule.get("Statement", {})
+        reference = statement.get("RuleGroupReferenceStatement")
+        if reference and reference["ARN"] in referenced:
+            group = referenced[reference["ARN"]]
+            for inner in group.get("Rules", []):
+                yield f"{group['Name']}/{inner['Name']}", inner.get("Statement", {})
+        else:
+            yield rule["Name"], statement
 
 
 def _label_no_longer_emitted(
     ref: ManagedRef,
     rules: Sequence[Mapping[str, Any]],
+    referenced: Mapping[str, Mapping[str, Any]],
     in_use: RuleGroupVersion,
     target: RuleGroupVersion,
 ) -> list[Finding]:
     findings = []
-    for rule in _later_rules(ref, rules):
+    for name, statement in _later_consumers(ref, rules, referenced):
         seen = set()
-        for scope, key in _label_matches(rule.get("Statement", {})):
+        for scope, key in _label_matches(statement):
             if key in seen or not _emits(in_use, scope, key) or _emits(target, scope, key):
                 continue
             seen.add(key)
@@ -192,9 +236,9 @@ def _label_no_longer_emitted(
                     "label-no-longer-emitted",
                     "error",
                     ref.group,
-                    f"rule {rule['Name']} matches {scope} {key}, not emitted by {target.name}",
+                    f"rule {name} matches {scope} {key}, not emitted by {target.name}",
                     {
-                        "rule": rule["Name"],
+                        "rule": name,
                         "managed_rule": ref.rule_name,
                         "scope": scope,
                         "key": key,
@@ -209,13 +253,16 @@ def _label_no_longer_emitted(
 def _labels_not_listed(
     ref: ManagedRef,
     rules: Sequence[Mapping[str, Any]],
+    referenced: Mapping[str, Mapping[str, Any]],
     in_use: RuleGroupVersion,
     target: RuleGroupVersion,
 ) -> list[Finding]:
     if in_use.available_labels or target.name == in_use.name:
         return []
     if not any(
-        True for rule in _later_rules(ref, rules) for _ in _label_matches(rule.get("Statement", {}))
+        True
+        for _, statement in _later_consumers(ref, rules, referenced)
+        for _ in _label_matches(statement)
     ):
         return []
     return [
@@ -226,6 +273,23 @@ def _labels_not_listed(
             f"{in_use.name} lists no labels; label changes could not be checked",
             {"rule": ref.rule_name, "in_use_version": in_use.name, "target_version": target.name},
         )
+    ]
+
+
+def _rule_group_not_checked(
+    web_acl: Mapping[str, Any], referenced: Mapping[str, Mapping[str, Any]]
+) -> list[Finding]:
+    return [
+        Finding(
+            "rule-group-not-checked",
+            "warning",
+            ref.arn,
+            f"rule {ref.rule_name} references rule group {ref.arn}, which was not fetched; "
+            "its rules were not checked",
+            {"rule": ref.rule_name, "arn": ref.arn},
+        )
+        for ref in rule_group_references(web_acl)
+        if ref.arn not in referenced
     ]
 
 
@@ -329,16 +393,23 @@ def _rules_changed(
 
 
 def check_web_acl(
-    web_acl: Mapping[str, Any], catalogs: Mapping[str, RuleGroupCatalog], target: str
+    web_acl: Mapping[str, Any],
+    catalogs: Mapping[str, RuleGroupCatalog],
+    target: str,
+    referenced: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[Finding]:
     """Return the findings for every AWS managed rule group in ``web_acl``, most severe first.
 
     ``catalogs`` must hold every referenced group with its in-use and target versions described,
-    except a default that cannot be described.
+    except a default that cannot be described. ``referenced`` maps the ARN of each fetched rule
+    group from a ``RuleGroupReferenceStatement`` to its ``GetRuleGroup`` ``RuleGroup``; the rules
+    in it count as label consumers, and a referenced ARN missing from it is reported as not
+    checked.
     """
+    referenced = referenced or {}
     acl = web_acl["WebACL"]
     rules = acl.get("Rules", [])
-    findings: list[Finding] = []
+    findings: list[Finding] = _rule_group_not_checked(web_acl, referenced)
     for ref in managed_references(web_acl):
         catalog = catalogs[ref.group]
         in_use_name, target_name = resolve_versions(
@@ -357,8 +428,8 @@ def check_web_acl(
         if wanted is not None:
             findings += _override_missing_rule(ref, wanted)
         if in_use is not None and wanted is not None:
-            findings += _label_no_longer_emitted(ref, rules, in_use, wanted)
-            findings += _labels_not_listed(ref, rules, in_use, wanted)
+            findings += _label_no_longer_emitted(ref, rules, referenced, in_use, wanted)
+            findings += _labels_not_listed(ref, rules, referenced, in_use, wanted)
             findings += _capacity_increase(ref, in_use, wanted, acl.get("Capacity"))
             findings += _rules_changed(ref, in_use, wanted)
     return sorted(findings, key=lambda f: (LEVELS.index(f.level), f.rule_group, f.code))
