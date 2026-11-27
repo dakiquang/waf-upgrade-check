@@ -1,10 +1,12 @@
 import pytest
 
 from waf_upgrade_check.check import (
+    ReferenceInputError,
     RuleGroupCatalog,
     TargetError,
     check_web_acl,
     resolve_versions,
+    rule_group_references,
 )
 from waf_upgrade_check.model import RuleGroupVersion
 
@@ -350,6 +352,19 @@ def rule_group_ref(name, arn=ARN, priority=None):
     if priority is not None:
         rule["Priority"] = priority
     return rule
+
+
+@pytest.mark.parametrize("reference", [None, {}, {"ARN": None}, [], "invalid"])
+def test_rule_group_references_reject_invalid_values(reference):
+    acl = web_acl({"Name": "Bad", "Statement": {"RuleGroupReferenceStatement": reference}})
+    with pytest.raises(ReferenceInputError, match="Bad.*ARN string"):
+        rule_group_references(acl)
+
+
+def test_rule_group_references_accept_absent_and_string_arn():
+    acl = web_acl({"Name": "Other", "Statement": {}}, rule_group_ref("Group", "", 3))
+    [reference] = rule_group_references(acl)
+    assert (reference.rule_name, reference.arn, reference.priority) == ("Group", "", 3)
 
 
 def rule_group(name, *rules):

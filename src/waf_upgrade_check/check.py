@@ -57,6 +57,10 @@ class RuleGroupCatalog:
     versions: Mapping[str, RuleGroupVersion]
 
 
+class ReferenceInputError(ValueError):
+    """A rule group reference has an invalid input shape."""
+
+
 class TargetError(ValueError):
     """The requested target version cannot be resolved for a rule group."""
 
@@ -90,9 +94,16 @@ def rule_group_references(web_acl: Mapping[str, Any]) -> list[RuleGroupRef]:
     """Return the rule group references in order; they only appear at the top level of a rule."""
     refs = []
     for rule in web_acl["WebACL"].get("Rules", []):
-        statement = rule.get("Statement", {}).get("RuleGroupReferenceStatement")
-        if statement:
-            refs.append(RuleGroupRef(rule["Name"], statement["ARN"], rule.get("Priority")))
+        statement = rule.get("Statement", {})
+        if "RuleGroupReferenceStatement" not in statement:
+            continue
+        reference = statement["RuleGroupReferenceStatement"]
+        if not isinstance(reference, dict) or not isinstance(reference.get("ARN"), str):
+            raise ReferenceInputError(
+                f"rule {rule.get('Name', '<unnamed>')} has a "
+                "RuleGroupReferenceStatement without an ARN string"
+            )
+        refs.append(RuleGroupRef(rule["Name"], reference["ARN"], rule.get("Priority")))
     return refs
 
 
