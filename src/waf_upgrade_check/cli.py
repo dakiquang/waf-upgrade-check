@@ -17,6 +17,7 @@ from .check import (
     LEVELS,
     Finding,
     ManagedRef,
+    ReferenceInputError,
     RuleGroupCatalog,
     TargetError,
     check_web_acl,
@@ -231,7 +232,11 @@ def _api_inputs(
     # A rule group that cannot be read is reported as not checked; it does not fail the run.
     referenced: dict[str, dict[str, Any]] = {}
     tried: set[str] = set()
-    for reference in rule_group_references(web_acl):
+    try:
+        references = rule_group_references(web_acl)
+    except ReferenceInputError as exc:
+        raise UsageError(str(exc)) from exc
+    for reference in references:
         if reference.arn in tried:
             continue
         tried.add(reference.arn)
